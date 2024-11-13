@@ -4,183 +4,147 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <pthread.h>
 
-#define PORT1 2201
-#define PORT2 2202
+#define PORT_PLAYER1 2201
+#define PORT_PLAYER2 2202
 #define BUFFER_SIZE 1024
 
-// Error codes
-#define ERROR_INVALID_PACKET_TYPE 100
-#define ERROR_INVALID_BEGIN_PARAMS 200
+// Function prototypes
+void *handle_client(void *socket_desc);
+void process_begin_packet(int socket, char *packet);
+void process_initialize_packet(int socket, char *packet);
+void process_game_packet(int socket, char *packet);
+void send_acknowledgment(int socket);
+void send_error(int socket, int error_code);
 
+// Main function
 int main() {
-    int server_fd1, server_fd2, new_socket1, new_socket2;
-    struct sockaddr_in address1, address2;
-    int addrlen = sizeof(address1);
-    char buffer[BUFFER_SIZE] = {0};
-    int board_width = 0, board_height = 0;  // Board dimensions initialized by player 1
+    int server_socket1, server_socket2, client_socket1, client_socket2;
+    struct sockaddr_in server_addr1, server_addr2, client_addr;
+    socklen_t addr_len = sizeof(struct sockaddr_in);
+
+    // Initialize server sockets for both players
+    server_socket1 = socket(AF_INET, SOCK_STREAM, 0);
+    server_socket2 = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket1 == -1 || server_socket2 == -1) {
+        perror("Socket creation failed");
+        return 1;
+    }
+
+    // Server 1 setup for Player 1
+    server_addr1.sin_family = AF_INET;
+    server_addr1.sin_addr.s_addr = INADDR_ANY;
+    server_addr1.sin_port = htons(PORT_PLAYER1);
     
-    // Set up server sockets for both players
-    if ((server_fd1 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed for player 1");
-        exit(EXIT_FAILURE);
+    if (bind(server_socket1, (struct sockaddr *)&server_addr1, sizeof(server_addr1)) < 0) {
+        perror("Bind failed on port 2201");
+        return 1;
     }
-    if ((server_fd2 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed for player 2");
-        close(server_fd1);
-        exit(EXIT_FAILURE);
+    listen(server_socket1, 3);
+
+    // Server 2 setup for Player 2
+    server_addr2.sin_family = AF_INET;
+    server_addr2.sin_addr.s_addr = INADDR_ANY;
+    server_addr2.sin_port = htons(PORT_PLAYER2);
+    
+    if (bind(server_socket2, (struct sockaddr *)&server_addr2, sizeof(server_addr2)) < 0) {
+        perror("Bind failed on port 2202");
+        return 1;
     }
+    listen(server_socket2, 3);
 
-    // Allow immediate reuse of ports if needed
-    int opt = 1;
-    setsockopt(server_fd1, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(server_fd2, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    // Configure player 1 address
-    address1.sin_family = AF_INET;
-    address1.sin_addr.s_addr = INADDR_ANY;
-    address1.sin_port = htons(PORT1);
-    // Bind to PORT1
-    if (bind(server_fd1, (struct sockaddr *)&address1, sizeof(address1)) < 0) {
-        perror("Bind failed for player 1");
-        close(server_fd1);
-        close(server_fd2);
-        exit(EXIT_FAILURE);
+    // Accept Player 1 connection
+    printf("Waiting for Player 1 to connect...\n");
+    client_socket1 = accept(server_socket1, (struct sockaddr *)&client_addr, &addr_len);
+    if (client_socket1 < 0) {
+        perror("Player 1 connection failed");
+        return 1;
     }
+    printf("Player 1 connected.\n");
 
-    // Configure player 2 address
-    address2.sin_family = AF_INET;
-    address2.sin_addr.s_addr = INADDR_ANY;
-    address2.sin_port = htons(PORT2);
-    // Bind to PORT2
-    if (bind(server_fd2, (struct sockaddr *)&address2, sizeof(address2)) < 0) {
-        perror("Bind failed for player 2");
-        close(server_fd1);
-        close(server_fd2);
-        exit(EXIT_FAILURE);
+    // Accept Player 2 connection
+    printf("Waiting for Player 2 to connect...\n");
+    client_socket2 = accept(server_socket2, (struct sockaddr *)&client_addr, &addr_len);
+    if (client_socket2 < 0) {
+        perror("Player 2 connection failed");
+        return 1;
     }
+    printf("Player 2 connected.\n");
 
-    // Listen for connections
-    if (listen(server_fd1, 1) < 0 || listen(server_fd2, 1) < 0) {
-        perror("Listen failed");
-        close(server_fd1);
-        close(server_fd2);
-        exit(EXIT_FAILURE);
-    }
+    // Start game handling in threads or sequentially (simple example with sequential handling here)
+    handle_client((void *)&client_socket1);
+    handle_client((void *)&client_socket2);
 
-    printf("[Server] Waiting for Player 1 to connect...\n");
-    new_socket1 = accept(server_fd1, (struct sockaddr *)&address1, (socklen_t *)&addrlen);
-    if (new_socket1 < 0) {
-        perror("Accept failed for player 1");
-        close(server_fd1);
-        close(server_fd2);
-        exit(EXIT_FAILURE);
-    }
-    printf("[Server] Player 1 connected.\n");
+    // Close sockets
+    close(client_socket1);
+    close(client_socket2);
+    close(server_socket1);
+    close(server_socket2);
 
-    printf("[Server] Waiting for Player 2 to connect...\n");
-    new_socket2 = accept(server_fd2, (struct sockaddr *)&address2, (socklen_t *)&addrlen);
-    if (new_socket2 < 0) {
-        perror("Accept failed for player 2");
-        close(new_socket1);
-        close(server_fd1);
-        close(server_fd2);
-        exit(EXIT_FAILURE);
-    }
-    printf("[Server] Player 2 connected.\n");
-
-    // Receive Begin packet from Player 1 to set board dimensions
-    int player1_init = 0, player2_init = 0;
-    int game_active = 1; // Game state flag
-
-    // Main loop for handling packets from both players
-    while (game_active) {
-        // Check for Player 1 Begin packet
-        if (player1_init == 0) {
-            int nbytes = read(new_socket1, buffer, BUFFER_SIZE);
-            if (nbytes <= 0) {
-                perror("[Server] Read error from Player 1");
-                break;
-            }
-            buffer[nbytes] = '\0';
-            if (buffer[0] == 'B') {
-                int width, height;
-                if (sscanf(buffer + 2, "%d %d", &width, &height) == 2 && width >= 10 && height >= 10) {
-                    board_width = width;
-                    board_height = height;
-                    snprintf(buffer, BUFFER_SIZE, "A");  // Acknowledge packet
-                    send(new_socket1, buffer, strlen(buffer), 0);
-                    printf("[Server] Received valid Begin packet from Player 1: Board %dx%d\n", width, height);
-                    player1_init = 1;
-                } else {
-                    snprintf(buffer, BUFFER_SIZE, "E %d", ERROR_INVALID_BEGIN_PARAMS);
-                    send(new_socket1, buffer, strlen(buffer), 0);
-                    printf("[Server] Invalid Begin packet parameters from Player 1.\n");
-                }
-            } else {
-                snprintf(buffer, BUFFER_SIZE, "E %d", ERROR_INVALID_PACKET_TYPE);
-                send(new_socket1, buffer, strlen(buffer), 0);
-                printf("[Server] Invalid packet type from Player 1.\n");
-            }
-        }
-        
-        // Check for Player 2 Begin packet
-        if (player2_init == 0 && player1_init == 1) {  // Ensure player 1 has initialized board dimensions
-            int nbytes = read(new_socket2, buffer, BUFFER_SIZE);
-            if (nbytes <= 0) {
-                perror("[Server] Read error from Player 2");
-                break;
-            }
-            buffer[nbytes] = '\0';
-            if (strcmp(buffer, "B") == 0) {
-                snprintf(buffer, BUFFER_SIZE, "A");  // Acknowledge packet
-                send(new_socket2, buffer, strlen(buffer), 0);
-                printf("[Server] Received valid Begin packet from Player 2\n");
-                player2_init = 1;
-            } else {
-                snprintf(buffer, BUFFER_SIZE, "E %d", ERROR_INVALID_PACKET_TYPE);
-                send(new_socket2, buffer, strlen(buffer), 0);
-                printf("[Server] Invalid Begin packet from Player 2.\n");
-            }
-        }
-
-        // Handle other packets (e.g., Forfeit) from both players once both are initialized
-        if (game_active && player1_init == 1 && player2_init == 1) {
-            int nbytes1 = read(new_socket1, buffer, BUFFER_SIZE);
-            if (nbytes1 > 0) {
-                buffer[nbytes1] = '\0';
-                if (buffer[0] == 'F') {
-                    snprintf(buffer, BUFFER_SIZE, "H 0");  // Forfeiting player receives H 0
-                    send(new_socket1, buffer, strlen(buffer), 0);
-                    snprintf(buffer, BUFFER_SIZE, "H 1");  // Other player receives H 1
-                    send(new_socket2, buffer, strlen(buffer), 0);
-                    game_active = 0;  // End the game
-                    printf("[Server] Player 1 forfeited. Game over.\n");
-                }
-            }
-            
-            if (game_active) { // Ensure the game hasn't ended before checking Player 2
-                int nbytes2 = read(new_socket2, buffer, BUFFER_SIZE);
-                if (nbytes2 > 0) {
-                    buffer[nbytes2] = '\0';
-                    if (buffer[0] == 'F') {
-                        snprintf(buffer, BUFFER_SIZE, "H 0");  // Forfeiting player receives H 0
-                        send(new_socket2, buffer, strlen(buffer), 0);
-                        snprintf(buffer, BUFFER_SIZE, "H 1");  // Other player receives H 1
-                        send(new_socket1, buffer, strlen(buffer), 0);
-                        game_active = 0;  // End the game
-                        printf("[Server] Player 2 forfeited. Game over.\n");
-                    }
-                }
-            }
-        }
-    }
-
-    // Close all sockets and exit
-    close(new_socket1);
-    close(new_socket2);
-    close(server_fd1);
-    close(server_fd2);
-    printf("[Server] Game shutdown completed.\n");
     return 0;
+}
+
+// Handle client packets
+void *handle_client(void *socket_desc) {
+    int socket = *(int *)socket_desc;
+    char buffer[BUFFER_SIZE];
+    int read_size;
+
+    // Game loop for receiving packets
+    while ((read_size = recv(socket, buffer, BUFFER_SIZE, 0)) > 0) {
+        buffer[read_size] = '\0';
+        
+        // Determine packet type and process accordingly
+        if (buffer[0] == 'B') {
+            process_begin_packet(socket, buffer);
+        } else if (buffer[0] == 'I') {
+            process_initialize_packet(socket, buffer);
+        } else {
+            process_game_packet(socket, buffer);
+        }
+    }
+    return 0;
+}
+
+// Process Begin packet (initial connection setup)
+void process_begin_packet(int socket, char *packet) {
+    // Example parsing and validation logic
+    printf("Received Begin packet: %s\n", packet);
+    // ... Process Begin packet and send acknowledgment or error
+    send_acknowledgment(socket);
+}
+
+// Process Initialize packet (ship placement)
+void process_initialize_packet(int socket, char *packet) {
+    printf("Received Initialize packet: %s\n", packet);
+    // ... Process Initialize packet, check validity
+    send_acknowledgment(socket);
+}
+
+// Process game packets (Shoot, Query, Forfeit)
+void process_game_packet(int socket, char *packet) {
+    printf("Received game packet: %s\n", packet);
+    if (packet[0] == 'S') {
+        // Handle Shoot
+    } else if (packet[0] == 'Q') {
+        // Handle Query
+    } else if (packet[0] == 'F') {
+        // Handle Forfeit
+    } else {
+        send_error(socket, 100); // Invalid packet type
+    }
+}
+
+// Send acknowledgment packet
+void send_acknowledgment(int socket) {
+    char *ack = "A";
+    send(socket, ack, strlen(ack), 0);
+}
+
+// Send error packet with code
+void send_error(int socket, int error_code) {
+    char error_msg[BUFFER_SIZE];
+    snprintf(error_msg, sizeof(error_msg), "E %d", error_code);
+    send(socket, error_msg, strlen(error_msg), 0);
 }
