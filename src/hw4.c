@@ -13,24 +13,6 @@
 #define ERROR_INVALID_PACKET_TYPE 100
 #define ERROR_INVALID_BEGIN_PARAMS 200
 
-// Packet handling
-void handle_begin_packet(int client_fd, char *packet, int *board_width, int *board_height, int player_number);
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-
-#define PORT1 2201
-#define PORT2 2202
-#define BUFFER_SIZE 1024
-
-// Error codes
-#define ERROR_INVALID_PACKET_TYPE 100
-#define ERROR_INVALID_BEGIN_PARAMS 200
-
 int main() {
     int server_fd1, server_fd2, new_socket1, new_socket2;
     struct sockaddr_in address1, address2;
@@ -201,52 +183,4 @@ int main() {
     close(server_fd2);
     printf("[Server] Game shutdown completed.\n");
     return 0;
-}
-
-// Function to handle different types of packets
-void handle_packet(int client_fd, char *packet, int *board_width, int *board_height, int player_number, int *game_active, int other_client_fd) {
-    char response[BUFFER_SIZE];
-
-    if (packet[0] == 'B') {
-        // Handle Begin packet
-        if (player_number == 1) {
-            int width, height;
-            if (sscanf(packet + 2, "%d %d", &width, &height) == 2 && width >= 10 && height >= 10) {
-                *board_width = width;
-                *board_height = height;
-                snprintf(response, BUFFER_SIZE, "A");  // Acknowledge packet
-                send(client_fd, response, strlen(response), 0);
-                printf("[Server] Received valid Begin packet from Player 1: Board %dx%d\n", width, height);
-            } else {
-                snprintf(response, BUFFER_SIZE, "E %d", ERROR_INVALID_BEGIN_PARAMS);
-                send(client_fd, response, strlen(response), 0);
-                printf("[Server] Invalid Begin packet parameters from Player 1.\n");
-            }
-        } else if (player_number == 2) {
-            if (strcmp(packet, "B") == 0) {
-                snprintf(response, BUFFER_SIZE, "A");  // Acknowledge packet
-                send(client_fd, response, strlen(response), 0);
-                printf("[Server] Received valid Begin packet from Player 2\n");
-            } else {
-                snprintf(response, BUFFER_SIZE, "E %d", ERROR_INVALID_PACKET_TYPE);
-                send(client_fd, response, strlen(response), 0);
-                printf("[Server] Invalid Begin packet from Player 2.\n");
-            }
-        }
-    } else if (packet[0] == 'F') {
-        // Forfeit packet handling
-        snprintf(response, BUFFER_SIZE, "H 0");  // Loss for the forfeiting player
-        send(client_fd, response, strlen(response), 0);
-
-        snprintf(response, BUFFER_SIZE, "H 1");  // Win for the other player
-        send(other_client_fd, response, strlen(response), 0);
-
-        *game_active = 0;  // End the game
-        printf("[Server] Player %d forfeited. Game over.\n", player_number);
-    } else {
-        // Handle invalid packet type
-        snprintf(response, BUFFER_SIZE, "E %d", ERROR_INVALID_PACKET_TYPE);
-        send(client_fd, response, strlen(response), 0);
-        printf("[Server] Invalid packet type from Player %d.\n", player_number);
-    }
 }
