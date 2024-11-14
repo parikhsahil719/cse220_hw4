@@ -27,6 +27,16 @@ int **initialize_board(int width, int height) {
     }
     return board;
 }
+void print_board(int **board, int width, int height) {
+    printf("Current Board State:\n");
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            printf("%d ", board[i][j]);
+        }
+        printf("\n");
+    }
+    printf("\n");
+}
 
 void free_board(int **board, int height) {
     for (int i = 0; i < height; i++) {
@@ -71,7 +81,7 @@ void get_piece_coordinates(int piece_type, int rotation, int ref_row, int ref_co
 }
 
 // Place a piece on the board, using the reference cell and rotation
-int place_piece(int **board, int board_width, int board_height, int piece_type, int rotation, int ref_row, int ref_col) {
+int place_piece(int **board, int board_width, int board_height, int piece_type, int rotation, int ref_row, int ref_col, int piece_id) {
     int coords[4][2];
     get_piece_coordinates(piece_type, rotation, ref_row, ref_col, coords);
 
@@ -91,11 +101,11 @@ int place_piece(int **board, int board_width, int board_height, int piece_type, 
         }
     }
 
-    // Place piece on the board
+    // Place piece on the board using piece_id as the identifier
     for (int i = 0; i < 4; i++) {
         int row = coords[i][0];
         int col = coords[i][1];
-        board[row][col] = 1;  // Mark cell as occupied
+        board[row][col] = piece_id;  // Mark cell with unique identifier
     }
 
     return 0;  // Success
@@ -132,21 +142,18 @@ int handle_initialize_packet(int conn_fd, int **board, int board_width, int boar
 
     // First pass: Validation only
     for (int i = 0; i < num_pieces; i++) {
-        // Parse the next set of four integers directly from the packet using sscanf
         int parsed = sscanf(packet + offset, "%d %d %d %d", &piece_type, &rotation, &ref_row, &ref_col);
-        
-        // Check if sscanf successfully parsed 4 values
         if (parsed != 4) {
-            lowest_error = lowest_error == 0 ? 201 : (lowest_error > 201 ? 201 : lowest_error);  // Invalid number of parameters
+            lowest_error = lowest_error == 0 ? 201 : (lowest_error > 201 ? 201 : lowest_error);
             continue;
         }
 
-        // Validate piece type and rotation before attempting placement
+        // Validate piece type and rotation
         if (piece_type < 1 || piece_type > 7) {
-            lowest_error = lowest_error == 0 ? 300 : (lowest_error > 300 ? 300 : lowest_error);  // Shape out of range
+            lowest_error = lowest_error == 0 ? 300 : (lowest_error > 300 ? 300 : lowest_error);
         }
         if (rotation < 1 || rotation > 4) {
-            lowest_error = lowest_error == 0 ? 301 : (lowest_error > 301 ? 301 : lowest_error);  // Rotation out of range
+            lowest_error = lowest_error == 0 ? 301 : (lowest_error > 301 ? 301 : lowest_error);
         }
 
         // Adjust for 0-based indexing for rotation in later placement
@@ -178,8 +185,8 @@ int handle_initialize_packet(int conn_fd, int **board, int board_width, int boar
         piece_type -= 1;
         rotation -= 1;
         
-        // Place the piece on the board
-        place_piece(board, board_width, board_height, piece_type, rotation, ref_row, ref_col);
+        // Use (i + 1) as a unique identifier for each piece
+        place_piece(board, board_width, board_height, piece_type, rotation, ref_row, ref_col, i + 1);
 
         // Update the offset to move to the next set of four integers
         offset += snprintf(NULL, 0, "%d %d %d %d ", piece_type + 1, rotation + 1, ref_row, ref_col);
@@ -339,6 +346,7 @@ int main() {
         // Use player1_board specifically for Player 1
         if (handle_initialize_packet(conn_fd1, player1_board, board_width, board_height, buffer) == 0) {
             printf("[Server] Player 1's board initialized successfully.\n");
+            print_board(player1_board, board_width, board_height);
             break;
         }
         // If invalid, handle_initialize_packet will send the error; continue loop to ask again
@@ -357,6 +365,7 @@ int main() {
         // Use player2_board specifically for Player 2
         if (handle_initialize_packet(conn_fd2, player2_board, board_width, board_height, buffer) == 0) {
             printf("[Server] Player 2's board initialized successfully.\n");
+            print_board(player2_board, board_width, board_height);
             break;
         }
         // If invalid, handle_initialize_packet will send the error; continue loop to ask again
