@@ -9,6 +9,9 @@
 #define PORT_PLAYER1 2201
 #define PORT_PLAYER2 2202
 #define BUFFER_SIZE 1024
+#define HIT 'H'
+#define MISS 'M'
+#define EMPTY 0
 
 int **initialize_board(int width, int height) {
     int **board = malloc(height * sizeof(int *));
@@ -197,6 +200,177 @@ int handle_initialize_packet(int conn_fd, int **board, int board_width, int boar
     return 0;
 }
 
+int handle_shoot_packet(int conn_fd, int **opponent_board, char **shot_history, int board_width, int board_height, int *remaining_ships, int conn_fd_opponent, char *packet) {
+    int row, col;
+
+    // Parse and validate the shoot packet
+    if (sscanf(packet, "S %d %d", &row, &col) != 2) {
+        send(conn_fd, "E 202\n", strlen("E 202\n"), 0);  // Invalid number of parameters
+        return -1;
+    }
+
+    // Check if the shot is out of bounds
+    if (row < 0 || row >= board_height || col < 0 || col >= board_width) {
+        send(conn_fd, "E 400\n", strlen("E 400\n"), 0);
+        return -1;
+    }
+
+    // Check if the shot was already taken
+    if (shot_history[row][col] != EMPTY) {
+        send(conn_fd, "E 401\n", strlen("E 401\n"), 0);
+        return -1;
+    }
+
+    // Determine if it's a hit or miss
+    char shot_result;
+    int piece_id = opponent_board[row][col];
+    if (piece_id != 0) {
+        // It's a hit
+        shot_result = 'H';
+        shot_history[row][col] = HIT;
+        opponent_board[row][col] = 'H';  // Mark the hit location with 'H'
+
+        // Check if the hit has sunk the ship
+        if (is_ship_sunk(opponent_board, board_width, board_height, piece_id)) {
+            (*remaining_ships)--;  // Decrement remaining ships count if the ship is sunk
+        }
+    } else {
+        // It's a miss
+        shot_result = 'M';
+        shot_history[row][col] = MISS;
+    }
+
+    // Send the shot response to the shooter
+    char response[BUFFER_SIZE];
+    snprintf(response, sizeof(response), "R %d %c\n", *remaining_ships, shot_result);
+    send(conn_fd, response, strlen(response), 0);
+
+    // If all ships are sunk, send halt packets
+    if (*remaining_ships == 0) {
+        // Send Halt to the opponent (loss)
+        send(conn_fd_opponent, "H 0\n", strlen("H 0\n"), 0);
+        // Wait for opponent to read before sending halt to the shooter
+        recv(conn_fd_opponent, response, BUFFER_SIZE, 0);
+
+        // Send Halt to the shooter (win)
+        send(conn_fd, "H 1\n", strlen("H 1\n"), 0);
+        return 1;  // Game over
+    }
+
+    return 0;
+}
+
+void handle_query_packet(int conn_fd, char **shot_history, int **opponent_board, int board_width, int board_height) {
+    char response[BUFFER_SIZE];
+    int response_offset = 0;
+
+    // Add remaining ships count
+    int remaining_ships = count_remaining_ships(opponent_board, board_width, board_height);
+    response_offset += snprintf(response + response_offset, sizeof(response) - response_offset, "G %d ", remaining_ships);
+
+    // Add each shot to the response in the format {M|H} column row
+    for (int i = 0; i < board_height; i++) {
+        for (int j = 0; j < board_width; j++) {
+            if (shot_history[i][j] == HIT) {
+                response_offset += snprintf(response + response_offset, sizeof(response) - response_offset, "H %d %d ", j, i);
+            } else if (shot_history[i][j] == MISS) {
+                response_offset += snprintf(response + response_offset, sizeof(response) - response_offset, "M %d %d ", j, i);
+            }
+        }
+    }
+
+    // Send the response to the client
+    send(conn_fd, response, strlen(response), 0);
+}
+
+void handle_forfeit_packet(int conn_fd, int conn_fd_opponent) {
+    // Send Halt to the forfeiting player (loss)
+    send(conn_fd, "H 0\n", strlen("H 0\n"), 0);
+    // Wait for the forfeiting player to read
+    char buffer[BUFFER_SIZE];
+    recv(conn_fd, buffer, BUFFER_SIZE, 0);
+
+    // Send Halt to the opponent (win)
+    send(conn_fd_opponent, "H 1\n", strlen("H 1\n"), 0);
+}
+
+void game_loop(int conn_fd1, int conn_fd2, int **player1_board, int **player2_board, char **player1_shot_history, char **player2_shot_history, int board_width, int board_height) {
+    int player1_remaining_ships = count_remaining_ships(player2_board, board_width, board_height);
+    int player2_remaining_ships = count_remaining_ships(player1_board, board_width, board_height);
+    int game_is_active = 1;
+    char buffer[BUFFER_SIZE];
+
+    while (game_is_active) {
+        // Player 1's turn
+        while (1) {
+            memset(buffer, 0, BUFFER_SIZE);
+            int bytes_received = recv(conn_fd1, buffer, BUFFER_SIZE, 0);
+            if (bytes_received <= 0) {
+                perror("Failed to receive packet from Player 1");
+                game_is_active = 0;
+                break;
+            }
+
+            if (strncmp(buffer, "S ", 2) == 0) {
+                // Handle Shoot packet from Player 1
+                int result = handle_shoot_packet(conn_fd1, player2_board, player1_shot_history, board_width, board_height, &player2_remaining_ships, conn_fd2, buffer);
+                if (result == 1) {
+                    game_is_active = 0;  // Game over if last ship is sunk
+                }
+                break;  // Switch to Player 2's turn
+            } else if (strcmp(buffer, "Q\n") == 0) {
+                // Handle Query packet from Player 1
+                handle_query_packet(conn_fd1, player1_shot_history, player2_board, board_width, board_height);
+                // Continue waiting for another packet from Player 1
+            } else if (strcmp(buffer, "F\n") == 0) {
+                // Handle Forfeit packet from Player 1
+                handle_forfeit_packet(conn_fd1, conn_fd2);
+                game_is_active = 0;  // Game over due to forfeit
+                break;
+            } else {
+                // Invalid packet type
+                send(conn_fd1, "E 102\n", strlen("E 102\n"), 0);
+            }
+        }
+
+        if (!game_is_active) break;
+
+        // Player 2's turn
+        while (1) {
+            memset(buffer, 0, BUFFER_SIZE);
+            int bytes_received = recv(conn_fd2, buffer, BUFFER_SIZE, 0);
+            if (bytes_received <= 0) {
+                perror("Failed to receive packet from Player 2");
+                game_is_active = 0;
+                break;
+            }
+
+            if (strncmp(buffer, "S ", 2) == 0) {
+                // Handle Shoot packet from Player 2
+                int result = handle_shoot_packet(conn_fd2, player1_board, player2_shot_history, board_width, board_height, &player1_remaining_ships, conn_fd1, buffer);
+                if (result == 1) {
+                    game_is_active = 0;  // Game over if last ship is sunk
+                }
+                break;  // Switch to Player 1's turn
+            } else if (strcmp(buffer, "Q\n") == 0) {
+                // Handle Query packet from Player 2
+                handle_query_packet(conn_fd2, player2_shot_history, player1_board, board_width, board_height);
+                // Continue waiting for another packet from Player 2
+            } else if (strcmp(buffer, "F\n") == 0) {
+                // Handle Forfeit packet from Player 2
+                handle_forfeit_packet(conn_fd2, conn_fd1);
+                game_is_active = 0;  // Game over due to forfeit
+                break;
+            } else {
+                // Invalid packet type
+                send(conn_fd2, "E 102\n", strlen("E 102\n"), 0);
+            }
+        }
+    }
+
+    // Free any resources or perform additional cleanup if needed
+}
+
 int main() {
     int listen_fd1, listen_fd2, conn_fd1, conn_fd2;
     struct sockaddr_in address1, address2;
@@ -373,14 +547,20 @@ int main() {
 
     printf("[Server] Both players have successfully initialized their boards.\n");
 
-    // Proceed with the game loop or further logic as needed
+    // Initialize shot histories for both players
+    char **player1_shot_history = initialize_shot_history(board_width, board_height);
+    char **player2_shot_history = initialize_shot_history(board_width, board_height);
 
-    // Free the allocated boards after the game
+    // Start the game loop
+    game_loop(conn_fd1, conn_fd2, player1_board, player2_board, player1_shot_history, player2_shot_history, board_width, board_height);
+
+    // Cleanup: Free allocated boards and histories after the game
     free_board(player1_board, board_height);
     free_board(player2_board, board_height);
+    free_shot_history(player1_shot_history, board_height);
+    free_shot_history(player2_shot_history, board_height);
 
-
-    // Close connections after game
+    // Close connections after the game ends
     close(conn_fd1);
     close(conn_fd2);
     close(listen_fd1);
