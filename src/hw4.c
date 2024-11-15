@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <asm-generic/socket.h>
 
 #define PORT_PLAYER1 2201
 #define PORT_PLAYER2 2202
@@ -16,12 +17,12 @@
 
 int **initialize_board(int width, int height) {
     int **board = malloc(height * sizeof(int *));
-    if (!board) return NULL;
-
+    if (!board) {
+        return NULL;
+    }
     for (int i = 0; i < height; i++) {
-        board[i] = calloc(width, sizeof(int));  // Initialize all cells to 0
+        board[i] = calloc(width, sizeof(int));
         if (!board[i]) {
-            // Free any allocated rows in case of failure
             for (int j = 0; j < i; j++) {
                 free(board[j]);
             }
@@ -49,7 +50,6 @@ void free_board(int **board, int height) {
     free(board);
 }
 
-// Define only the base (initial) rotation for each shape, with the circled reference cell at (0, 0)
 int base_shapes[7][4][2] = {
     {{0, 0}, {0, 1}, {1, 0}, {1, 1}},  // O-piece
     {{0, 0}, {1, 0}, {2, 0}, {3, 0}},  // I-piece
@@ -60,48 +60,40 @@ int base_shapes[7][4][2] = {
     {{0, 0}, {1, -1}, {1, 0}, {1, 1}}  // T-piece
 };
 
-// Rotate a point 90 degrees clockwise around the origin (reference cell at (0,0))
 void rotate_90(int *x, int *y) {
     int temp = *x;
     *x = *y;
     *y = -temp;
 }
 
-// Get coordinates for the rotated piece around the reference (circled) cell
 void get_piece_coordinates(int piece_type, int rotation, int ref_row, int ref_col, int coords[4][2]) {
     for (int i = 0; i < 4; i++) {
         int x = base_shapes[piece_type][i][0];
         int y = base_shapes[piece_type][i][1];
 
-        if (rotation > 1) {// Adjust the rotation count to apply the correct number of 90-degree rotations
+        if (rotation > 1) {
             for (int r = 0; r < rotation - 1; r++) {
                 rotate_90(&x, &y);
             }
         }
-        // Translate to board position using the circled cell as the reference
         coords[i][0] = ref_row + x;
         coords[i][1] = ref_col + y;
     }
 }
 
-// Place a piece on the board, using the reference cell and rotation
 int place_piece(int **board, int board_width, int board_height, int piece_type, int rotation, int ref_row, int ref_col, int piece_id) {
     int coords[4][2];
     get_piece_coordinates(piece_type, rotation, ref_row, ref_col, coords);
 
-    // Validate each cell in the piece
     for (int i = 0; i < 4; i++) {
         int row = coords[i][0];
         int col = coords[i][1];
 
-        // Check if within bounds
         if (row < 0 || row >= board_height || col < 0 || col >= board_width) {
-            return 302;  // Ship doesn’t fit in game board
+            return 302;
         }
-
-        // Check for overlap
         if (board[row][col] != 0) {
-            return 303;  // Ships overlap
+            return 303;
         }
     }
 
@@ -123,81 +115,101 @@ int validate_piece_placement(int **board, int board_width, int board_height, int
         int row = coords[i][0];
         int col = coords[i][1];
 
-        // Check if within bounds
         if (row < 0 || row >= board_height || col < 0 || col >= board_width) {
-            return 302;  // Ship doesn’t fit in game board
+            return 302;
         }
 
-        // Check for overlap
         if (board[row][col] != 0) {
-            return 303;  // Ships overlap
+            return 303;
         }
     }
 
-    return 0;  // Valid placement
+    return 0;
 }
 
-// Handle the Initialize packet for setting up pieces
 int handle_initialize_packet(int conn_fd, int **board, int board_width, int board_height, char *packet) {
     int piece_type, rotation, ref_row, ref_col;
-    int num_pieces = 5;  // Expecting 5 pieces in the initialize packet, i.e., 20 integers
-    int offset = 2;      // Start after "I " to skip the initial character and space
-    int lowest_error = 0;  // Track the lowest error code; 0 indicates no errors
+    int num_pieces = 5;
+    int offset = 2;
+    int lowest_error = 0;
 
-    // First pass: Validation only
-    for (int i = 0; i < num_pieces; i++) {
-        int parsed = sscanf(packet + offset, "%d %d %d %d", &piece_type, &rotation, &ref_row, &ref_col);
-        if (parsed != 4) {
-            lowest_error = lowest_error == 0 ? 201 : (lowest_error > 201 ? 201 : lowest_error);
-            continue;
-        }
-
-        // Validate piece type and rotation
-        if (piece_type < 1 || piece_type > 7) {
-            lowest_error = lowest_error == 0 ? 300 : (lowest_error > 300 ? 300 : lowest_error);
-        }
-        if (rotation < 1 || rotation > 4) {
-            lowest_error = lowest_error == 0 ? 301 : (lowest_error > 301 ? 301 : lowest_error);
-        }
-
-        // Adjust for 0-based indexing for rotation in later placement
-        piece_type -= 1;
-        rotation -= 1;
-
-        // Check if placement would be out of bounds or overlap, but don’t place yet
-        int error_code = validate_piece_placement(board, board_width, board_height, piece_type, rotation, ref_row, ref_col);
-        if (error_code) {
-            lowest_error = lowest_error == 0 ? error_code : (lowest_error > error_code ? error_code : lowest_error);
-        }
-
-        // Update the offset to move to the next set of four integers
-        offset += snprintf(NULL, 0, "%d %d %d %d ", piece_type + 1, rotation + 1, ref_row, ref_col);
-    }
-
-    // If there's any error, return the lowest error code
-    if (lowest_error != 0) {
-        char error_msg[BUFFER_SIZE];
-        snprintf(error_msg, sizeof(error_msg), "E %d\n", lowest_error);
-        send(conn_fd, error_msg, strlen(error_msg), 0);
+    if (strncmp(packet, "I ", 2) != 0) {
+        send(conn_fd, "E 101", strlen("E 101"), 0);
         return -1;
     }
 
-    // Second pass: Placement (only if validation was successful)
-    offset = 2;  // Reset offset to start after "I "
+    int parameter_count = 0;
+    for (int i = 2; packet[i] != '\0'; i++) {
+        if (!isspace(packet[i]) && (i == 2 || isspace(packet[i - 1]))) {
+            parameter_count++;
+        }
+    }
+
+    if (parameter_count != (num_pieces * 4)) {
+        send(conn_fd, "E 201", strlen("E 201"), 0);
+        return -1;
+    }
+
+    int **temp_board = initialize_board(board_width, board_height);
+    if (!temp_board) {
+        perror("Failed to allocate temporary board");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < num_pieces; i++) {
+        int parsed = sscanf(packet + offset, "%d %d %d %d", &piece_type, &rotation, &ref_row, &ref_col);
+
+        if (parsed != 4) {
+            if (lowest_error == 0 || lowest_error > 201) {
+                lowest_error = 201;
+            }
+            continue;
+        }
+
+        if (piece_type < 1 || piece_type > 7) {
+            if (lowest_error == 0 || lowest_error > 300) {
+                lowest_error = 300;
+            }
+        }
+
+        if (rotation < 1 || rotation > 4) {
+            if (lowest_error == 0 || lowest_error > 301) {
+                lowest_error = 301;
+            }
+        }
+
+        piece_type -= 1;
+        rotation -= 1;
+
+        int error_code = place_piece(temp_board, board_width, board_height, piece_type, rotation, ref_row, ref_col, i + 1);
+        if (error_code && (lowest_error == 0 || lowest_error > error_code)) {
+            lowest_error = error_code;
+        }
+
+        offset += snprintf(NULL, 0, "%d %d %d %d ", piece_type + 1, rotation + 1, ref_row, ref_col);
+    }
+
+    free_board(temp_board, board_height);
+
+    if (lowest_error != 0) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, sizeof(error_msg), "E %d", lowest_error);
+        send(conn_fd, error_msg, strlen(error_msg), 0);
+        return -1; 
+    }
+
+    offset = 2;
     for (int i = 0; i < num_pieces; i++) {
         sscanf(packet + offset, "%d %d %d %d", &piece_type, &rotation, &ref_row, &ref_col);
         piece_type -= 1;
         rotation -= 1;
-        
-        // Use (i + 1) as a unique identifier for each piece
+
         place_piece(board, board_width, board_height, piece_type, rotation, ref_row, ref_col, i + 1);
 
-        // Update the offset to move to the next set of four integers
         offset += snprintf(NULL, 0, "%d %d %d %d ", piece_type + 1, rotation + 1, ref_row, ref_col);
     }
 
-    // Send acknowledgment after all pieces are successfully placed
-    send(conn_fd, "A\n", strlen("A\n"), 0);
+    send(conn_fd, "A", strlen("A"), 0);
     return 0;
 }
 
@@ -205,34 +217,38 @@ int is_ship_sunk(int **board, int width, int height, int piece_id) {
     for (int i = 0; i < height; i++) {
         for (int j = 0; j < width; j++) {
             if (board[i][j] == piece_id) {
-                return 0;  // Ship is not yet sunk, as there is still a cell with the piece_id
+                return 0;
             }
         }
     }
     return 1;  // Ship is fully sunk
 }
 
-int count_remaining_ships(int **board, int width, int height) {
-    bool ship_found[6] = {false};  // Tracks if ship IDs 1 through 5 have been counted
+int count_remaining_ships(int **opponent_board, int board_width, int board_height) {
+    int ship_counts[5] = {0};
     int remaining_ships = 0;
 
-    for (int i = 0; i < height; i++) {
-        for (int j = 0; j < width; j++) {
-            int piece_id = board[i][j];
-            // Only count IDs between 1 and 5, and only if we haven't counted this ship ID yet
-            if (piece_id >= 1 && piece_id <= 5 && !ship_found[piece_id]) {
-                ship_found[piece_id] = true;  // Mark this piece ID as counted
-                remaining_ships++;  // Increment remaining ships count
+    for (int i = 0; i < board_height; i++) {
+        for (int j = 0; j < board_width; j++) {
+            int cell = opponent_board[i][j];
+            if (cell >= 1 && cell <= 5) {
+                ship_counts[cell - 1] = 1;
             }
         }
     }
+
+    for (int i = 0; i < 5; i++) {
+        remaining_ships += ship_counts[i];
+    }
+
     return remaining_ships;
 }
 
 char **initialize_shot_history(int width, int height) {
     char **history = malloc(height * sizeof(char *));
-    if (!history) return NULL;
-
+    if (!history){
+        return NULL;
+    }
     for (int i = 0; i < height; i++) {
         history[i] = malloc(width * sizeof(char));
         if (!history[i]) {
@@ -242,7 +258,7 @@ char **initialize_shot_history(int width, int height) {
             free(history);
             return NULL;
         }
-        memset(history[i], 0, width * sizeof(char));  // Initialize all cells to 0 (no shot taken)
+        memset(history[i], 0, width * sizeof(char));
     }
     return history;
 }
@@ -256,96 +272,84 @@ void free_shot_history(char **history, int height) {
 
 int handle_shoot_packet(int conn_fd, int **opponent_board, char **shot_history, int board_width, int board_height, int *remaining_ships, int conn_fd_opponent, char *packet) {
     int row, col;
+    char extra;
 
-    // Parse and validate the shoot packet
-    if (sscanf(packet, "S %d %d", &row, &col) != 2) {
-        send(conn_fd, "E 202\n", strlen("E 202\n"), 0);  // Invalid number of parameters
+    if (sscanf(packet, "S %d %d %c", &row, &col, &extra) != 2) {
+        printf("[Server] Invalid shoot packet format: '%s'\n", packet);
+        send(conn_fd, "E 202", strlen("E 202"), 0);
         return -1;
     }
 
-    // Check if the shot is out of bounds
     if (row < 0 || row >= board_height || col < 0 || col >= board_width) {
-        send(conn_fd, "E 400\n", strlen("E 400\n"), 0);
+        printf("[Server] Out-of-bounds coordinates: row=%d, col=%d (board: %dx%d)\n", row, col, board_width, board_height);
+        send(conn_fd, "E 400", strlen("E 400"), 0);
         return -1;
     }
 
-    // Check if the shot was already taken
     if (shot_history[row][col] != EMPTY) {
-        send(conn_fd, "E 401\n", strlen("E 401\n"), 0);
+        printf("[Server] Cell already shot at: row=%d, col=%d\n", row, col);
+        send(conn_fd, "E 401", strlen("E 401"), 0);
         return -1;
     }
 
-    // Determine if it's a hit or miss
     char shot_result;
     int piece_id = opponent_board[row][col];
     if (piece_id != 0) {
-        // It's a hit
         shot_result = 'H';
         shot_history[row][col] = HIT;
-        opponent_board[row][col] = 'H';  // Mark the hit location with 'H'
+        opponent_board[row][col] = 'H';
+        printf("[Server] Hit detected at row=%d, col=%d\n", row, col);
 
-        // Check if the hit has sunk the ship
         if (is_ship_sunk(opponent_board, board_width, board_height, piece_id)) {
-            (*remaining_ships)--;  // Decrement remaining ships count if the ship is sunk
+            (*remaining_ships)--;
+            printf("[Server] Ship sunk! Remaining ships: %d\n", *remaining_ships);
         }
     } else {
-        // It's a miss
         shot_result = 'M';
         shot_history[row][col] = MISS;
+        printf("[Server] Miss at row=%d, col=%d\n", row, col);
     }
 
-    // Send the shot response to the shooter
     char response[BUFFER_SIZE];
-    snprintf(response, sizeof(response), "R %d %c\n", *remaining_ships, shot_result);
+    snprintf(response, sizeof(response), "R %d %c", *remaining_ships, shot_result);
     send(conn_fd, response, strlen(response), 0);
+    printf("[Server] Shot result sent: %s\n", response);
 
-    // If all ships are sunk, send halt packets
     if (*remaining_ships == 0) {
-        // Send Halt to the opponent (loss)
-        send(conn_fd_opponent, "H 0\n", strlen("H 0\n"), 0);
-        // Wait for opponent to read before sending halt to the shooter
+        printf("[Server] All ships sunk. Ending game.\n");
+        send(conn_fd_opponent, "H 0", strlen("H 0"), 0);
         recv(conn_fd_opponent, response, BUFFER_SIZE, 0);
-
-        // Send Halt to the shooter (win)
-        send(conn_fd, "H 1\n", strlen("H 1\n"), 0);
-        return 1;  // Game over
+        send(conn_fd, "H 1", strlen("H 1"), 0);
+        return 1;
     }
 
     return 0;
 }
 
 void handle_query_packet(int conn_fd, char **shot_history, int **opponent_board, int board_width, int board_height) {
-    char response[BUFFER_SIZE];
-    int response_offset = 0;
-
-    // Add remaining ships count
     int remaining_ships = count_remaining_ships(opponent_board, board_width, board_height);
-    response_offset += snprintf(response + response_offset, sizeof(response) - response_offset, "G %d ", remaining_ships);
 
-    // Add each shot to the response in the format {M|H} column row
+    char response[BUFFER_SIZE];
+    snprintf(response, sizeof(response), "G %d", remaining_ships);
+
     for (int i = 0; i < board_height; i++) {
         for (int j = 0; j < board_width; j++) {
-            if (shot_history[i][j] == HIT) {
-                response_offset += snprintf(response + response_offset, sizeof(response) - response_offset, "H %d %d ", j, i);
-            } else if (shot_history[i][j] == MISS) {
-                response_offset += snprintf(response + response_offset, sizeof(response) - response_offset, "M %d %d ", j, i);
+            if (shot_history[i][j] == 'H' || shot_history[i][j] == 'M') {
+                char shot_entry[16];
+                snprintf(shot_entry, sizeof(shot_entry), " %c %d %d", shot_history[i][j], i, j);
+                strncat(response, shot_entry, sizeof(response) - strlen(response) - 1);
             }
         }
     }
 
-    // Send the response to the client
     send(conn_fd, response, strlen(response), 0);
 }
 
 void handle_forfeit_packet(int conn_fd, int conn_fd_opponent) {
-    // Send Halt to the forfeiting player (loss)
-    send(conn_fd, "H 0\n", strlen("H 0\n"), 0);
-    // Wait for the forfeiting player to read
+    send(conn_fd, "H 0", strlen("H 0"), 0);
     char buffer[BUFFER_SIZE];
     recv(conn_fd, buffer, BUFFER_SIZE, 0);
-
-    // Send Halt to the opponent (win)
-    send(conn_fd_opponent, "H 1\n", strlen("H 1\n"), 0);
+    send(conn_fd_opponent, "H 1", strlen("H 1"), 0);
 }
 
 void game_loop(int conn_fd1, int conn_fd2) {
@@ -357,7 +361,6 @@ void game_loop(int conn_fd1, int conn_fd2) {
     char **player2_shot_history = NULL;
 
     // Phase 1: Waiting for "Begin" or "Forfeit" packets from both players
-    // Player 1 - Set up board dimensions or forfeit
     printf("[Server] Waiting for valid Begin or Forfeit packet from Player 1...\n");
     while (1) {
         memset(buffer, 0, BUFFER_SIZE);
@@ -367,32 +370,42 @@ void game_loop(int conn_fd1, int conn_fd2) {
             exit(EXIT_FAILURE);
         }
 
-        // Check for "Begin" packet from Player 1 with dimensions
-        if (sscanf(buffer, "B %d %d", &board_width, &board_height) == 2) {
-            if (board_width >= 10 && board_height >= 10) {
-                // Valid packet, initialize board and send acknowledgment
-                send(conn_fd1, "A\n", strlen("A\n"), 0);
-                printf("[Server] Board initialized with size %dx%d\n", board_width, board_height);
-                break;
-            } else {
-                send(conn_fd1, "E 200\n", strlen("E 200\n"), 0);
-                fprintf(stderr, "[Server] Invalid board dimensions received from Player 1\n");
+        // Ensure null-termination for safety
+        buffer[bytes_received] = '\0';
+
+        // Check if the packet starts with 'B'
+        if (strncmp(buffer, "B", 1) == 0) {
+            char remaining_chars;
+            int parsed = sscanf(buffer, "B %d %d%c", &board_width, &board_height, &remaining_chars);
+            
+            if (parsed == 2) {  // Valid format with exactly two parameters
+                if (board_width >= 10 && board_height >= 10) {
+                    send(conn_fd1, "A", strlen("A"), 0);
+                    printf("[Server] Board initialized with size %dx%d\n", board_width, board_height);
+                    break;
+                } else {  // Invalid dimensions
+                    send(conn_fd1, "E 200", strlen("E 200"), 0);
+                    fprintf(stderr, "[Server] Invalid board dimensions received from Player 1\n");
+                }
+            } else {  // Malformed "B" packet
+                send(conn_fd1, "E 200", strlen("E 200"), 0);
+                fprintf(stderr, "[Server] Malformed Begin packet received from Player 1\n");
             }
-        } 
-        // Check for "Forfeit" packet from Player 1
-        else if (strcmp(buffer, "F\n") == 0 || strcmp(buffer, "F") == 0) {
-            // Player 1 forfeits, send Halt packets to both players
-            send(conn_fd1, "H 0\n", strlen("H 0\n"), 0);  // Halt with loss to Player 1
-            send(conn_fd2, "H 1\n", strlen("H 1\n"), 0);  // Halt with win to Player 2
+        }
+        // Check if the packet is a "Forfeit" packet
+        else if (strcmp(buffer, "F") == 0 || strcmp(buffer, "F\n") == 0) {
+            send(conn_fd1, "H 0", strlen("H 0"), 0);
+            send(conn_fd2, "H 1", strlen("H 1"), 0);
             printf("[Server] Player 1 forfeited during Begin phase. Game halted.\n");
-            exit(EXIT_SUCCESS);  // End the game
-        } else {
-            send(conn_fd1, "E 100\n", strlen("E 100\n"), 0);
-            fprintf(stderr, "[Server] Invalid Begin or Forfeit packet format from Player 1\n");
+            exit(EXIT_SUCCESS);
+        }
+        // If the packet is neither "B" nor "F", it is an invalid command
+        else {
+            send(conn_fd1, "E 100", strlen("E 100"), 0);
+            fprintf(stderr, "[Server] Invalid packet type received from Player 1\n");
         }
     }
 
-    // Player 2 - Acknowledge Begin packet with no parameters or forfeit
     printf("[Server] Waiting for valid Begin or Forfeit packet from Player 2...\n");
     while (1) {
         memset(buffer, 0, BUFFER_SIZE);
@@ -402,30 +415,27 @@ void game_loop(int conn_fd1, int conn_fd2) {
             exit(EXIT_FAILURE);
         }
 
-        // Check if the packet is exactly "B" or "B\n" for Player 2
-        if (strcmp(buffer, "B\n") == 0 || strcmp(buffer, "B") == 0) {
-            // Valid packet, send acknowledgment and break the loop
-            send(conn_fd2, "A\n", strlen("A\n"), 0);
+        // Ensure null-termination for safety
+        buffer[bytes_received] = '\0';
+
+        // Validate Player 2's packet strictly
+        if (strcmp(buffer, "B") == 0 || strcmp(buffer, "B\n") == 0) {  // Accept "B" or "B\n" only
+            send(conn_fd2, "A", strlen("A"), 0);
             printf("[Server] Valid Begin packet received from Player 2\n");
             break;
-        }
-        // Check if the packet starts with "B" but has extra parameters (e.g., "B 1 1")
-        else if (strncmp(buffer, "B", 1) == 0) {
-            // Player 2 sent additional parameters with "B", return E 200 for invalid format
-            send(conn_fd2, "E 200\n", strlen("E 200\n"), 0);
+        } 
+        else if (strncmp(buffer, "B ", 2) == 0) {  // Reject "B" with parameters
+            send(conn_fd2, "E 200", strlen("E 200"), 0);
             fprintf(stderr, "[Server] Invalid Begin packet format for Player 2: extra parameters\n");
         }
-        // Check for "Forfeit" packet from Player 2
-        else if (strcmp(buffer, "F\n") == 0 || strcmp(buffer, "F") == 0) {
-            // Player 2 forfeits, send Halt packets to both players
-            send(conn_fd2, "H 0\n", strlen("H 0\n"), 0);  // Halt with loss to Player 2
-            send(conn_fd1, "H 1\n", strlen("H 1\n"), 0);  // Halt with win to Player 1
+        else if (strcmp(buffer, "F") == 0 || strcmp(buffer, "F\n") == 0) {  // Check for "Forfeit"
+            send(conn_fd2, "H 0", strlen("H 0"), 0);
+            send(conn_fd1, "H 1", strlen("H 1"), 0);
             printf("[Server] Player 2 forfeited during Begin phase. Game halted.\n");
-            exit(EXIT_SUCCESS);  // End the game
+            exit(EXIT_SUCCESS);
         } 
-        else {
-            // Invalid packet type, send E 100
-            send(conn_fd2, "E 100\n", strlen("E 100\n"), 0);
+        else {  // Any other invalid format
+            send(conn_fd2, "E 100", strlen("E 100"), 0);
             fprintf(stderr, "[Server] Invalid packet type received from Player 2 during Begin phase\n");
         }
     }
@@ -439,7 +449,7 @@ void game_loop(int conn_fd1, int conn_fd2) {
     }
 
     // Phase 2: Waiting for "Initialize" packets from both players
-   printf("[Server] Waiting for valid Initialize or Forfeit packet from Player 1...\n");
+    printf("[Server] Waiting for valid Initialize or Forfeit packet from Player 1...\n");
     while (1) {
         memset(buffer, 0, BUFFER_SIZE);
         int bytes_received = recv(conn_fd1, buffer, BUFFER_SIZE, 0);
@@ -448,27 +458,22 @@ void game_loop(int conn_fd1, int conn_fd2) {
             exit(EXIT_FAILURE);
         }
 
-        // Check for "Forfeit" packet from Player 1 first
+        buffer[bytes_received] = '\0';
+
+        // Check for "Forfeit" packet from Player 1
         if (strcmp(buffer, "F\n") == 0 || strcmp(buffer, "F") == 0) {
-            // Player 1 forfeits, send Halt packets to both players
-            send(conn_fd1, "H 0\n", strlen("H 0\n"), 0);  // Halt with loss to Player 1
-            send(conn_fd2, "H 1\n", strlen("H 1\n"), 0);  // Halt with win to Player 2
+            send(conn_fd1, "H 0", strlen("H 0"), 0);
+            send(conn_fd2, "H 1", strlen("H 1"), 0);
             printf("[Server] Player 1 forfeited during Initialize phase. Game halted.\n");
-            exit(EXIT_SUCCESS);  // End the game
+            exit(EXIT_SUCCESS);
         }
-        // Check for "Initialize" packet from Player 1 if no Forfeit packet is found
-        else if (handle_initialize_packet(conn_fd1, player1_board, board_width, board_height, buffer) == 0) {
+
+        if (handle_initialize_packet(conn_fd1, player1_board, board_width, board_height, buffer) == 0) {
             printf("[Server] Player 1's board initialized successfully.\n");
-            break;  // Successfully initialized, move to Player 2's Initialize
-        } 
-        else {
-            // Invalid packet type during Initialize phase, send E 101 error
-            send(conn_fd1, "E 101\n", strlen("E 101\n"), 0);
-            fprintf(stderr, "[Server] Invalid Initialize or Forfeit packet format from Player 1\n");
+            break;
         }
     }
 
-    // Player 2 - Initialize board or Forfeit
     printf("[Server] Waiting for valid Initialize or Forfeit packet from Player 2...\n");
     while (1) {
         memset(buffer, 0, BUFFER_SIZE);
@@ -478,23 +483,19 @@ void game_loop(int conn_fd1, int conn_fd2) {
             exit(EXIT_FAILURE);
         }
 
-        // Check for "Forfeit" packet from Player 2 first
+        buffer[bytes_received] = '\0';
+
+        // Check for "Forfeit" packet from Player 2
         if (strcmp(buffer, "F\n") == 0 || strcmp(buffer, "F") == 0) {
-            // Player 2 forfeits, send Halt packets to both players
-            send(conn_fd2, "H 0\n", strlen("H 0\n"), 0);  // Halt with loss to Player 2
-            send(conn_fd1, "H 1\n", strlen("H 1\n"), 0);  // Halt with win to Player 1
+            send(conn_fd2, "H 0", strlen("H 0"), 0);
+            send(conn_fd1, "H 1", strlen("H 1"), 0);
             printf("[Server] Player 2 forfeited during Initialize phase. Game halted.\n");
-            exit(EXIT_SUCCESS);  // End the game
+            exit(EXIT_SUCCESS);
         }
-        // Check for "Initialize" packet from Player 2 if no Forfeit packet is found
-        else if (handle_initialize_packet(conn_fd2, player2_board, board_width, board_height, buffer) == 0) {
+
+        if (handle_initialize_packet(conn_fd2, player2_board, board_width, board_height, buffer) == 0) {
             printf("[Server] Player 2's board initialized successfully.\n");
-            break;  // Successfully initialized, move to the game loop
-        }
-        else {
-            // Invalid packet type during Initialize phase, send E 101 error
-            send(conn_fd2, "E 101\n", strlen("E 101\n"), 0);
-            fprintf(stderr, "[Server] Invalid Initialize or Forfeit packet format from Player 2\n");
+            break;
         }
     }
 
@@ -504,13 +505,10 @@ void game_loop(int conn_fd1, int conn_fd2) {
     player1_shot_history = initialize_shot_history(board_width, board_height);
     player2_shot_history = initialize_shot_history(board_width, board_height);
 
-    // Phase 3: Begin the main game loop (turn-based)
-
     int player1_remaining_ships = count_remaining_ships(player2_board, board_width, board_height);
     int player2_remaining_ships = count_remaining_ships(player1_board, board_width, board_height);
     int game_is_active = 1;
 
-    // Main Game Loop
     while (game_is_active) {
         // Player 1's turn
         while (1) {
@@ -523,34 +521,37 @@ void game_loop(int conn_fd1, int conn_fd2) {
             }
 
             if (strncmp(buffer, "S ", 2) == 0) {
-                // Handle Shoot packet from Player 1
                 int result = handle_shoot_packet(conn_fd1, player2_board, player1_shot_history, board_width, board_height, &player2_remaining_ships, conn_fd2, buffer);
-                if (result == 1) {  // Last ship sunk; Player 1 wins
-                    // Send Shoot response to Player 1, then read Player 2's turn and send Halt
-                    recv(conn_fd2, buffer, BUFFER_SIZE, 0);  // Read Player 2's turn
-                    send(conn_fd2, "H 0\n", strlen("H 0\n"), 0);  // Halt with loss to Player 2
-                    recv(conn_fd1, buffer, BUFFER_SIZE, 0);  // Read Player 1's turn
-                    send(conn_fd1, "H 1\n", strlen("H 1\n"), 0);  // Halt with win to Player 1
+                if (result == 1) {
+                    recv(conn_fd2, buffer, BUFFER_SIZE, 0);
+                    send(conn_fd2, "H 0", strlen("H 0"), 0);
+                    recv(conn_fd1, buffer, BUFFER_SIZE, 0);
+                    send(conn_fd1, "H 1", strlen("H 1"), 0);
                     game_is_active = 0;
                 }
-                break;  // Switch to Player 2's turn
-            } else if (strcmp(buffer, "Q\n") == 0) {
-                // Handle Query packet from Player 1
+                if (result == 0) {
+                    break;
+                }
+                continue;
+            } 
+            else if (strcmp(buffer, "Q\n") == 0 || strcmp(buffer, "Q") == 0) {
                 handle_query_packet(conn_fd1, player1_shot_history, player2_board, board_width, board_height);
-            } else if (strcmp(buffer, "F\n") == 0) {
-                // Player 1 forfeits; send Halt to Player 1, then read Player 2's turn and send Halt
-                send(conn_fd1, "H 0\n", strlen("H 0\n"), 0);  // Halt with loss to Player 1
-                recv(conn_fd2, buffer, BUFFER_SIZE, 0);  // Read Player 2's turn
-                send(conn_fd2, "H 1\n", strlen("H 1\n"), 0);  // Halt with win to Player 2
+                continue;
+            } 
+            else if (strcmp(buffer, "F\n") == 0 || strcmp(buffer, "F") == 0) {
+                send(conn_fd1, "H 0", strlen("H 0"), 0);
+                recv(conn_fd2, buffer, BUFFER_SIZE, 0);
+                send(conn_fd2, "H 1", strlen("H 1"), 0);
                 game_is_active = 0;
                 break;
             } else {
-                // Invalid packet type
-                send(conn_fd1, "E 102\n", strlen("E 102\n"), 0);
+                send(conn_fd1, "E 102", strlen("E 102"), 0);
             }
         }
 
-        if (!game_is_active) break;
+        if (!game_is_active) {
+            break;
+        }
 
         // Player 2's turn
         while (1) {
@@ -563,35 +564,36 @@ void game_loop(int conn_fd1, int conn_fd2) {
             }
 
             if (strncmp(buffer, "S ", 2) == 0) {
-                // Handle Shoot packet from Player 2
                 int result = handle_shoot_packet(conn_fd2, player1_board, player2_shot_history, board_width, board_height, &player1_remaining_ships, conn_fd1, buffer);
-                if (result == 1) {  // Last ship sunk; Player 2 wins
-                    // Send Shoot response to Player 2, then read Player 1's turn and send Halt
-                    recv(conn_fd1, buffer, BUFFER_SIZE, 0);  // Read Player 1's turn
-                    send(conn_fd1, "H 0\n", strlen("H 0\n"), 0);  // Halt with loss to Player 1
-                    recv(conn_fd2, buffer, BUFFER_SIZE, 0);  // Read Player 2's turn
-                    send(conn_fd2, "H 1\n", strlen("H 1\n"), 0);  // Halt with win to Player 2
+                if (result == 1) {
+                    recv(conn_fd1, buffer, BUFFER_SIZE, 0);
+                    send(conn_fd1, "H 0", strlen("H 0"), 0);
+                    recv(conn_fd2, buffer, BUFFER_SIZE, 0);
+                    send(conn_fd2, "H 1", strlen("H 1"), 0);
                     game_is_active = 0;
                 }
-                break;  // Switch to Player 1's turn
-            } else if (strcmp(buffer, "Q\n") == 0) {
-                // Handle Query packet from Player 2
+                if (result == 0) {
+                    break;
+                }
+                continue;
+            } 
+            else if (strcmp(buffer, "Q\n") == 0 || strcmp(buffer, "Q") == 0) {
                 handle_query_packet(conn_fd2, player2_shot_history, player1_board, board_width, board_height);
-            } else if (strcmp(buffer, "F\n") == 0) {
-                // Player 2 forfeits; send Halt to Player 2, then read Player 1's turn and send Halt
-                send(conn_fd2, "H 0\n", strlen("H 0\n"), 0);  // Halt with loss to Player 2
-                recv(conn_fd1, buffer, BUFFER_SIZE, 0);  // Read Player 1's turn
-                send(conn_fd1, "H 1\n", strlen("H 1\n"), 0);  // Halt with win to Player 1
+                continue;
+            } 
+            else if (strcmp(buffer, "F\n") == 0 || strcmp(buffer, "F") == 0) {
+                send(conn_fd2, "H 0", strlen("H 0"), 0);
+                recv(conn_fd1, buffer, BUFFER_SIZE, 0);
+                send(conn_fd1, "H 1", strlen("H 1"), 0);
                 game_is_active = 0;
                 break;
             } else {
-                // Invalid packet type
-                send(conn_fd2, "E 102\n", strlen("E 102\n"), 0);
+                send(conn_fd2, "E 102", strlen("E 102"), 0);
             }
         }
     }
 
-    // Cleanup: Free allocated boards and histories after the game
+    // Free allocated boards and histories after the game ends
     free_board(player1_board, board_height);
     free_board(player2_board, board_height);
     free_shot_history(player1_shot_history, board_height);
@@ -604,68 +606,94 @@ int main() {
     int opt = 1;
     socklen_t addrlen = sizeof(struct sockaddr_in);
     char buffer[BUFFER_SIZE] = {0};
-    int board_width, board_height;
 
-    // Setting up socket for Player 1
-    if ((listen_fd1 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("socket failed for Player 1");
+    // Socket creation for Player 1
+    if ((listen_fd1 = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+        perror("[Server] socket() failed for Player 1");
         exit(EXIT_FAILURE);
     }
 
-    if (setsockopt(listen_fd1, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-        perror("setsockopt for Player 1");
+    // Set socket options for Player 1
+    if (setsockopt(listen_fd1, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)) == -1) {
+        perror("[Server] setsockopt() failed for Player 1");
+        close(listen_fd1);
         exit(EXIT_FAILURE);
     }
 
+    // Initialize address structure for Player 1
+    memset(&address1, 0, sizeof(address1));
     address1.sin_family = AF_INET;
     address1.sin_addr.s_addr = INADDR_ANY;
     address1.sin_port = htons(PORT_PLAYER1);
 
-    if (bind(listen_fd1, (struct sockaddr *)&address1, sizeof(address1)) < 0) {
-        perror("bind failed for Player 1");
+    // Bind socket to port for Player 1
+    if (bind(listen_fd1, (struct sockaddr *)&address1, sizeof(address1)) == -1) {
+        perror("[Server] bind() failed for Player 1");
+        close(listen_fd1);
         exit(EXIT_FAILURE);
     }
 
-    if (listen(listen_fd1, 1) < 0) {
-        perror("listen failed for Player 1");
+    // Listen for Player 1
+    if (listen(listen_fd1, 1) == -1) {
+        perror("[Server] listen() failed for Player 1");
+        close(listen_fd1);
+        exit(EXIT_FAILURE);
+    }
+    printf("[Server] Listening for Player 1 on port %d...\n", PORT_PLAYER1);
+
+    // Socket creation for Player 2
+    if ((listen_fd2 = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+        perror("[Server] socket() failed for Player 2");
+        close(listen_fd1);
         exit(EXIT_FAILURE);
     }
 
-    // Setting up socket for Player 2
-    if ((listen_fd2 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("socket failed for Player 2");
+    // Set socket options for Player 2
+    if (setsockopt(listen_fd2, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)) == -1) {
+        perror("[Server] setsockopt() failed for Player 2");
+        close(listen_fd1);
+        close(listen_fd2);
         exit(EXIT_FAILURE);
     }
 
-    if (setsockopt(listen_fd2, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-        perror("setsockopt for Player 2");
-        exit(EXIT_FAILURE);
-    }
-
+    // Initialize address structure for Player 2
+    memset(&address2, 0, sizeof(address2));
     address2.sin_family = AF_INET;
     address2.sin_addr.s_addr = INADDR_ANY;
     address2.sin_port = htons(PORT_PLAYER2);
 
-    if (bind(listen_fd2, (struct sockaddr *)&address2, sizeof(address2)) < 0) {
-        perror("bind failed for Player 2");
+    // Bind socket to port for Player 2
+    if (bind(listen_fd2, (struct sockaddr *)&address2, sizeof(address2)) == -1) {
+        perror("[Server] bind() failed for Player 2");
+        close(listen_fd1);
+        close(listen_fd2);
         exit(EXIT_FAILURE);
     }
 
-    if (listen(listen_fd2, 1) < 0) {
-        perror("listen failed for Player 2");
+    // Listen for Player 2
+    if (listen(listen_fd2, 1) == -1) {
+        perror("[Server] listen() failed for Player 2");
+        close(listen_fd1);
+        close(listen_fd2);
         exit(EXIT_FAILURE);
     }
+    printf("[Server] Listening for Player 2 on port %d...\n", PORT_PLAYER2);
 
-    printf("[Server] Waiting for Player 1 on port %d...\n", PORT_PLAYER1);
-    if ((conn_fd1 = accept(listen_fd1, (struct sockaddr *)&address1, &addrlen)) < 0) {
-        perror("accept failed for Player 1");
+    // Accept connection from Player 1
+    if ((conn_fd1 = accept(listen_fd1, (struct sockaddr *)&address1, &addrlen)) == -1) {
+        perror("[Server] accept() failed for Player 1");
+        close(listen_fd1);
+        close(listen_fd2);
         exit(EXIT_FAILURE);
     }
     printf("[Server] Player 1 connected!\n");
 
-    printf("[Server] Waiting for Player 2 on port %d...\n", PORT_PLAYER2);
-    if ((conn_fd2 = accept(listen_fd2, (struct sockaddr *)&address2, &addrlen)) < 0) {
-        perror("accept failed for Player 2");
+    // Accept connection from Player 2
+    if ((conn_fd2 = accept(listen_fd2, (struct sockaddr *)&address2, &addrlen)) == -1) {
+        perror("[Server] accept() failed for Player 2");
+        close(listen_fd1);
+        close(listen_fd2);
+        close(conn_fd1);
         exit(EXIT_FAILURE);
     }
     printf("[Server] Player 2 connected!\n");
@@ -673,7 +701,6 @@ int main() {
     // Start the game loop
     game_loop(conn_fd1, conn_fd2);
 
-    // Close connections after the game ends
     close(conn_fd1);
     close(conn_fd2);
     close(listen_fd1);
@@ -681,4 +708,3 @@ int main() {
 
     return 0;
 }
-
