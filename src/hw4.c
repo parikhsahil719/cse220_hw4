@@ -32,11 +32,12 @@ int **initialize_board(int width, int height) {
     }
     return board;
 }
+
 void print_board(int **board, int width, int height) {
     printf("Current Board State:\n");
     for (int i = 0; i < height; i++) {
         for (int j = 0; j < width; j++) {
-            printf("%d ", board[i][j]);
+            printf("%2d ", board[i][j]);
         }
         printf("\n");
     }
@@ -85,23 +86,33 @@ int place_piece(int **board, int board_width, int board_height, int piece_type, 
     int coords[4][2];
     get_piece_coordinates(piece_type, rotation, ref_row, ref_col, coords);
 
+    // First pass: Validate the piece's placement
     for (int i = 0; i < 4; i++) {
         int row = coords[i][0];
         int col = coords[i][1];
 
+        // Debugging: Print the coordinates being checked
+        printf("[Server] Checking block %d of piece %d at (%d, %d)\n", i, piece_type, row, col);
+
+        // Check for out-of-bounds coordinates
         if (row < 0 || row >= board_height || col < 0 || col >= board_width) {
-            return 302;
+            printf("[Server] Block %d of piece %d is out of bounds at (%d, %d)\n", i, piece_type, row, col);
+            return 302;  // Return error if even one block is out of bounds
         }
+
+        // Check for overlapping cells
         if (board[row][col] != 0) {
-            return 303;
+            printf("[Server] Block %d of piece %d overlaps at (%d, %d)\n", i, piece_type, row, col);
+            return 303;  // Return error if the block overlaps an existing piece
         }
     }
 
-    // Place piece on the board using piece_id as the identifier
+    // Second pass: Place the piece on the board
     for (int i = 0; i < 4; i++) {
         int row = coords[i][0];
         int col = coords[i][1];
-        board[row][col] = piece_id;  // Mark cell with unique identifier
+        board[row][col] = piece_id;
+        printf("[Server] Placed block %d of piece %d at (%d, %d)\n", i, piece_type, row, col);
     }
 
     return 0;  // Success
@@ -133,29 +144,32 @@ int handle_initialize_packet(int conn_fd, int **board, int board_width, int boar
     int offset = 2;
     int lowest_error = 0;
 
+    // Validate the packet header
     if (strncmp(packet, "I ", 2) != 0) {
         send(conn_fd, "E 101", strlen("E 101"), 0);
         return -1;
     }
 
+    // Validate the number of parameters
     int parameter_count = 0;
     for (int i = 2; packet[i] != '\0'; i++) {
         if (!isspace(packet[i]) && (i == 2 || isspace(packet[i - 1]))) {
             parameter_count++;
         }
     }
-
     if (parameter_count != (num_pieces * 4)) {
         send(conn_fd, "E 201", strlen("E 201"), 0);
         return -1;
     }
 
+    // Temporary board for validation
     int **temp_board = initialize_board(board_width, board_height);
     if (!temp_board) {
         perror("Failed to allocate temporary board");
         exit(EXIT_FAILURE);
     }
 
+    // Validate each piece
     for (int i = 0; i < num_pieces; i++) {
         int parsed = sscanf(packet + offset, "%d %d %d %d", &piece_type, &rotation, &ref_row, &ref_col);
 
@@ -181,6 +195,7 @@ int handle_initialize_packet(int conn_fd, int **board, int board_width, int boar
         piece_type -= 1;
         rotation -= 1;
 
+        // Validate placement on the temporary board
         int error_code = place_piece(temp_board, board_width, board_height, piece_type, rotation, ref_row, ref_col, i + 1);
         if (error_code && (lowest_error == 0 || lowest_error > error_code)) {
             lowest_error = error_code;
@@ -191,13 +206,15 @@ int handle_initialize_packet(int conn_fd, int **board, int board_width, int boar
 
     free_board(temp_board, board_height);
 
+    // If any validation error occurred, send the lowest error code
     if (lowest_error != 0) {
         char error_msg[BUFFER_SIZE];
         snprintf(error_msg, sizeof(error_msg), "E %d", lowest_error);
         send(conn_fd, error_msg, strlen(error_msg), 0);
-        return -1; 
+        return -1;
     }
 
+    // Place the pieces on the actual game board
     offset = 2;
     for (int i = 0; i < num_pieces; i++) {
         sscanf(packet + offset, "%d %d %d %d", &piece_type, &rotation, &ref_row, &ref_col);
@@ -217,7 +234,7 @@ int is_ship_sunk(int **board, int width, int height, int piece_id) {
     for (int i = 0; i < height; i++) {
         for (int j = 0; j < width; j++) {
             if (board[i][j] == piece_id) {
-                return 0;
+                return 0;  // Ship is not yet sunk
             }
         }
     }
@@ -274,53 +291,62 @@ int handle_shoot_packet(int conn_fd, int **opponent_board, char **shot_history, 
     int row, col;
     char extra;
 
+    // Parse the "Shoot" packet and validate the format
     if (sscanf(packet, "S %d %d %c", &row, &col, &extra) != 2) {
         printf("[Server] Invalid shoot packet format: '%s'\n", packet);
-        send(conn_fd, "E 202", strlen("E 202"), 0);
+        send(conn_fd, "E 202", strlen("E 202"), 0);  // Invalid number of parameters
         return -1;
     }
 
+    // Check if the coordinates are out of bounds
     if (row < 0 || row >= board_height || col < 0 || col >= board_width) {
         printf("[Server] Out-of-bounds coordinates: row=%d, col=%d (board: %dx%d)\n", row, col, board_width, board_height);
-        send(conn_fd, "E 400", strlen("E 400"), 0);
+        send(conn_fd, "E 400", strlen("E 400"), 0);  // Shot is out of bounds
         return -1;
     }
 
+    // Check if the cell has already been shot at
     if (shot_history[row][col] != EMPTY) {
         printf("[Server] Cell already shot at: row=%d, col=%d\n", row, col);
-        send(conn_fd, "E 401", strlen("E 401"), 0);
+        send(conn_fd, "E 401", strlen("E 401"), 0);  // Shot already taken
         return -1;
     }
 
+    // Determine the result of the shot
     char shot_result;
     int piece_id = opponent_board[row][col];
     if (piece_id != 0) {
+        // It's a hit
         shot_result = 'H';
         shot_history[row][col] = HIT;
-        opponent_board[row][col] = 'H';
-        printf("[Server] Hit detected at row=%d, col=%d\n", row, col);
+        opponent_board[row][col] = 'H';  // Mark the hit on the opponent's board
+        printf("[Server] Hit detected at row=%d, col=%d (Piece ID: %d)\n", row, col, piece_id);
 
+        // Check if the hit ship is sunk
         if (is_ship_sunk(opponent_board, board_width, board_height, piece_id)) {
-            (*remaining_ships)--;
-            printf("[Server] Ship sunk! Remaining ships: %d\n", *remaining_ships);
+            (*remaining_ships)--;  // Decrement remaining ships if the ship is sunk
+            printf("[Server] Ship with ID %d is sunk! Remaining ships: %d\n", piece_id, *remaining_ships);
         }
     } else {
+        // It's a miss
         shot_result = 'M';
         shot_history[row][col] = MISS;
         printf("[Server] Miss at row=%d, col=%d\n", row, col);
     }
 
+    // Respond to the shooter with the result of the shot
     char response[BUFFER_SIZE];
     snprintf(response, sizeof(response), "R %d %c", *remaining_ships, shot_result);
     send(conn_fd, response, strlen(response), 0);
     printf("[Server] Shot result sent: %s\n", response);
 
+    // Check if all ships are sunk, and send game halt if necessary
     if (*remaining_ships == 0) {
         printf("[Server] All ships sunk. Ending game.\n");
         send(conn_fd_opponent, "H 0", strlen("H 0"), 0);
-        recv(conn_fd_opponent, response, BUFFER_SIZE, 0);
+        recv(conn_fd_opponent, response, BUFFER_SIZE, 0);  // Wait for acknowledgment
         send(conn_fd, "H 1", strlen("H 1"), 0);
-        return 1;
+        return 1;  // Game over
     }
 
     return 0;
@@ -470,6 +496,7 @@ void game_loop(int conn_fd1, int conn_fd2) {
 
         if (handle_initialize_packet(conn_fd1, player1_board, board_width, board_height, buffer) == 0) {
             printf("[Server] Player 1's board initialized successfully.\n");
+            print_board(player1_board, board_width, board_height);
             break;
         }
     }
@@ -495,6 +522,7 @@ void game_loop(int conn_fd1, int conn_fd2) {
 
         if (handle_initialize_packet(conn_fd2, player2_board, board_width, board_height, buffer) == 0) {
             printf("[Server] Player 2's board initialized successfully.\n");
+            print_board(player2_board, board_width, board_height);
             break;
         }
     }
